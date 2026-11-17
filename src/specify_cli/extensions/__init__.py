@@ -3051,6 +3051,10 @@ class ExtensionManager:
 
         hooks_started = False
         registry_started = False
+        # Pre-bind so the rollback below can consult them even when the
+        # failure happens inside (or before) the registration calls.
+        registered_commands: Dict[str, List[str]] = {}
+        registered_skills: List[str] = []
         try:
             # Register commands with AI agents (active integration only, #2948)
             registered_commands = {}
@@ -3151,6 +3155,39 @@ class ExtensionManager:
                 if rollback_errors:
                     raise ExtensionError(
                         f"Generic registration failed ({exc}); rollback failed: "
+                        + "; ".join(rollback_errors)
+                    ) from exc
+            elif registered_commands or registered_skills:
+                # Native-route equivalent of rollback_generic_registration
+                # (#5379): a failed install must also retire the command and
+                # skill outputs this attempt wrote for non-generic agents.
+                # They are not recorded in the registry (the add failed or
+                # never ran), so no later lifecycle operation would own them.
+                # Both unregister paths only remove outputs they can verify
+                # as spec-kit's own, so a user skill is never touched.
+                rollback_errors = []
+                safe_commands = {
+                    agent: names_
+                    for agent, names_ in registered_commands.items()
+                    if agent != "generic" and names_
+                }
+                if safe_commands:
+                    try:
+                        CommandRegistrar(
+                            self.project_root, include_generic=False
+                        ).unregister_commands(safe_commands, self.project_root)
+                    except Exception as error:
+                        rollback_errors.append(f"commands: {error}")
+                if registered_skills:
+                    try:
+                        self._unregister_extension_skills(
+                            registered_skills, manifest.id
+                        )
+                    except Exception as error:
+                        rollback_errors.append(f"skills: {error}")
+                if rollback_errors:
+                    raise ExtensionError(
+                        f"Installation failed ({exc}); rollback failed: "
                         + "; ".join(rollback_errors)
                     ) from exc
             raise

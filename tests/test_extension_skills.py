@@ -3168,6 +3168,83 @@ class TestRegisterExtensionSkillsForceFlag:
 
 # ===== Extension Skill Unregistration Tests =====
 
+class TestFailedInstallRollsBackNativeOutputs:
+    """A failed ``extension add`` must not strand native skill outputs (#5379).
+
+    When installation fails after command registration (hook registration or
+    the final registry write), the rollback removed the installed package and
+    registry entry but left the native ``<skills dir>/speckit-*/SKILL.md``
+    outputs behind, unrecorded and unowned by any later lifecycle operation.
+    The generic route's ``rollback_generic_registration`` already removes its
+    outputs; these pin the equivalent for the native route.
+    """
+
+    def _install_expecting_failure(self, project_dir, temp_dir):
+        from specify_cli.extensions import ExtensionError
+
+        manager = ExtensionManager(project_dir)
+        with pytest.raises((ExtensionError, RuntimeError)):
+            manager.install_from_directory(
+                _create_extension_dir(temp_dir), "1.0.0", register_commands=True
+            )
+        return manager
+
+    def _assert_no_outputs(self, project_dir, manager):
+        skills_root = project_dir / ".claude" / "skills"
+        for name in ("speckit-test-ext-hello", "speckit-test-ext-world"):
+            assert not (skills_root / name).exists(), (
+                f"failed install must not leave {name} behind (#5379)"
+            )
+        assert not manager.registry.is_installed("test-ext")
+
+    def test_hook_registration_failure_removes_native_skill_outputs(
+        self, project_dir, temp_dir, monkeypatch
+    ):
+        from specify_cli.extensions import HookExecutor
+
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+
+        def boom(self, manifest):
+            raise RuntimeError("simulated hook-write failure")
+
+        monkeypatch.setattr(HookExecutor, "register_hooks", boom)
+        manager = self._install_expecting_failure(project_dir, temp_dir)
+        self._assert_no_outputs(project_dir, manager)
+
+    def test_registry_write_failure_removes_native_skill_outputs(
+        self, project_dir, temp_dir, monkeypatch
+    ):
+        from specify_cli.extensions import ExtensionRegistry
+
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+
+        def boom(self, extension_id, entry):
+            raise RuntimeError("simulated registry-write failure")
+
+        monkeypatch.setattr(ExtensionRegistry, "add", boom)
+        manager = self._install_expecting_failure(project_dir, temp_dir)
+        self._assert_no_outputs(project_dir, manager)
+
+    def test_rollback_preserves_preexisting_user_skill_dir(
+        self, project_dir, temp_dir, monkeypatch
+    ):
+        """Rollback only removes what the attempt wrote, not user skills."""
+        from specify_cli.extensions import HookExecutor
+
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+        user_dir = project_dir / ".claude" / "skills" / "speckit-my-own-skill"
+        user_dir.mkdir(parents=True)
+        (user_dir / "SKILL.md").write_text("user skill", encoding="utf-8")
+
+        def boom(self, manifest):
+            raise RuntimeError("simulated hook-write failure")
+
+        monkeypatch.setattr(HookExecutor, "register_hooks", boom)
+        manager = self._install_expecting_failure(project_dir, temp_dir)
+        self._assert_no_outputs(project_dir, manager)
+        assert (user_dir / "SKILL.md").read_text(encoding="utf-8") == "user skill"
+
+
 class TestExtensionSkillUnregistration:
     """Test _unregister_extension_skills() on ExtensionManager."""
 
