@@ -3168,6 +3168,108 @@ class TestRegisterExtensionSkillsForceFlag:
 
 # ===== Extension Skill Unregistration Tests =====
 
+class TestRegistrarSkillOverwriteGuard:
+    """The registrar's native /SKILL.md route must not clobber user skills (#5380)."""
+
+    def test_extension_add_preserves_preexisting_user_skill(
+        self, project_dir, temp_dir
+    ):
+        """A user-authored skill of the same name survives add and remove.
+
+        ``install_from_directory(register_commands=True)`` writes native
+        SKILL.md outputs through ``CommandRegistrar.register_commands()``,
+        which overwrote a pre-existing user skill without warning; the later
+        ``extension remove`` then deleted it. A user file carries no
+        ``metadata.source`` provenance marker, so registration must skip it,
+        and removal must leave it alone.
+        """
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+        user_dir = project_dir / ".claude" / "skills" / "speckit-test-ext-hello"
+        user_dir.mkdir(parents=True)
+        (user_dir / "SKILL.md").write_text("user skill", encoding="utf-8")
+        (user_dir / "notes.txt").write_text("user", encoding="utf-8")
+
+        manager = ExtensionManager(project_dir)
+        manager.install_from_directory(
+            _create_extension_dir(temp_dir), "1.0.0", register_commands=True
+        )
+
+        assert (user_dir / "SKILL.md").read_text(encoding="utf-8") == "user skill", (
+            "registration must not overwrite a user-authored SKILL.md (#5380)"
+        )
+
+        assert manager.remove("test-ext") is True
+        assert (user_dir / "SKILL.md").read_text(encoding="utf-8") == "user skill", (
+            "removal after a skipped registration must not delete the "
+            "user's skill (#5380)"
+        )
+        assert (user_dir / "notes.txt").read_text(encoding="utf-8") == "user"
+
+    def test_extension_add_does_not_write_into_preexisting_user_dir(
+        self, project_dir, temp_dir
+    ):
+        """A pre-existing directory without SKILL.md stays untouched.
+
+        Without a verifiable ownership marker, rollback and removal cannot
+        distinguish our output from user artifacts — the same rule
+        ``_register_extension_skills`` applies on the supplemental route.
+        """
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+        user_dir = project_dir / ".claude" / "skills" / "speckit-test-ext-hello"
+        user_dir.mkdir(parents=True)
+
+        manager = ExtensionManager(project_dir)
+        manager.install_from_directory(
+            _create_extension_dir(temp_dir), "1.0.0", register_commands=True
+        )
+
+        assert not (user_dir / "SKILL.md").exists(), (
+            "registration must not add files to a pre-existing user "
+            "directory (#5380)"
+        )
+
+    def test_reregistration_still_overwrites_marker_owned_output(
+        self, project_dir, temp_dir
+    ):
+        """Spec-kit's own prior output (marker present) stays overwritable.
+
+        Update, switch, and rescaffold flows re-register over files the
+        machinery wrote earlier; the guard keys on the provenance marker,
+        not mere existence, so those flows keep working.
+        """
+        from specify_cli.agents import CommandRegistrar
+
+        _create_init_options(project_dir, ai="claude", ai_skills=True)
+        manager = ExtensionManager(project_dir)
+        ext_dir = _create_extension_dir(temp_dir)
+        manager.install_from_directory(ext_dir, "1.0.0", register_commands=True)
+
+        skill_file = (
+            project_dir / ".claude" / "skills" / "speckit-test-ext-hello" / "SKILL.md"
+        )
+        assert skill_file.is_file()
+        original = skill_file.read_text(encoding="utf-8")
+        assert "metadata" in original, "sanity: generated output carries a marker"
+
+        # Mangle the body but keep the frontmatter marker, then re-register.
+        skill_file.write_text(original + "\nstale tail\n", encoding="utf-8")
+        registrar = CommandRegistrar(project_dir)
+        registered = registrar.register_commands(
+            "claude",
+            [{"name": "speckit.test-ext.hello", "file": "commands/hello.md"}],
+            "test-ext",
+            ext_dir,
+            project_dir,
+            extension_id="test-ext",
+        )
+        assert "speckit.test-ext.hello" in registered
+        regenerated = skill_file.read_text(encoding="utf-8")
+        assert "stale tail" not in regenerated, (
+            "marker-owned output must be regenerated, not skipped"
+        )
+        assert regenerated.startswith("---\n")
+
+
 class TestExtensionSkillUnregistration:
     """Test _unregister_extension_skills() on ExtensionManager."""
 

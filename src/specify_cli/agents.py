@@ -635,6 +635,54 @@ class CommandRegistrar:
         relative = path.relative_to(project_root.resolve()).as_posix()
         return hashes.get(relative) == hashlib.sha256(path.read_bytes()).hexdigest()
 
+    @classmethod
+    def _skill_output_is_overwritable(cls, dest_file: Path, source_dir: Path) -> bool:
+        """Whether a ``/SKILL.md`` write may replace what is at *dest_file*.
+
+        Every SKILL.md spec-kit generates — through this registrar, the
+        extension skills route, preset skills, or template setup — carries a
+        ``metadata.source`` provenance marker. A file without a readable
+        marker is the user's and must never be overwritten (#5380); a
+        pre-existing skill directory without a SKILL.md is likewise the
+        user's, and adding files to it would leave rollback and removal
+        unable to tell our output from user artifacts. Mirrors the guards
+        ``ExtensionManager._register_extension_skills`` already applies on
+        the supplemental route. A symlink resolving into *source_dir* (a
+        dev-mode link into this source's own cache, possibly stale or
+        broken) is this machinery's output and stays replaceable even
+        though a cached body may carry no marker.
+        """
+        if dest_file.exists() or dest_file.is_symlink():
+            if dest_file.is_symlink():
+                try:
+                    target = dest_file.resolve(strict=False)
+                    if target.is_relative_to(source_dir.resolve()):
+                        return True
+                except OSError:
+                    return False
+                # A link into any ``.specify-dev/extension-skills`` cache is
+                # spec-kit's own dev-mode output, wherever that source tree
+                # lives (the original --dev directory, not the installed
+                # copy), so it stays replaceable too.
+                parts = target.parts
+                if any(
+                    parts[i] == ".specify-dev"
+                    and parts[i + 1] == "extension-skills"
+                    for i in range(len(parts) - 1)
+                ):
+                    return True
+            try:
+                fm, _ = cls.parse_frontmatter(
+                    dest_file.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError):
+                return False
+            metadata = fm.get("metadata") if isinstance(fm, dict) else None
+            source = metadata.get("source") if isinstance(metadata, dict) else None
+            return isinstance(source, str) and bool(source)
+        skill_dir = dest_file.parent
+        return not (skill_dir.exists() or skill_dir.is_symlink())
+
     @staticmethod
     def _same_lexical_path(left: Path, right: Path) -> bool:
         """Compare paths after lexical normalization without resolving symlinks."""
@@ -911,6 +959,12 @@ class CommandRegistrar:
             if agent_name == "generic" and (dest_file.exists() or dest_file.is_symlink()):
                 if not self._generic_owned_output(dest_file, source_id, project_root):
                     continue
+            if (
+                agent_name != "generic"
+                and agent_config["extension"] == "/SKILL.md"
+                and not self._skill_output_is_overwritable(dest_file, source_dir)
+            ):
+                continue
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             self._write_registered_output(
                 dest_file,
@@ -998,6 +1052,12 @@ class CommandRegistrar:
                 if agent_name == "generic" and (alias_file.exists() or alias_file.is_symlink()):
                     if not self._generic_owned_output(alias_file, source_id, project_root):
                         continue
+                if (
+                    agent_name != "generic"
+                    and agent_config["extension"] == "/SKILL.md"
+                    and not self._skill_output_is_overwritable(alias_file, source_dir)
+                ):
+                    continue
                 alias_file.parent.mkdir(parents=True, exist_ok=True)
                 self._write_registered_output(
                     alias_file,
